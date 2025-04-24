@@ -1,0 +1,722 @@
+unit DFMsSqlUnit;
+
+interface
+
+uses
+  System.SysUtils, System.Classes, Data.DB, Data.Win.ADODB, Vcl.Dialogs;
+
+type
+  TDFMsSqlConnection = class(TObject)
+  private
+    FConnectionString: string;
+    FConnection: TADOConnection;
+    FQuery: TADOQuery;
+    FLastError: string;
+    FLastErrorCode: Integer;
+    FConnected: Boolean;
+    FTimeout: Integer;
+
+    procedure SetConnectionString(const Value: string);
+    procedure SetTimeout(const Value: Integer);
+    function GetConnected: Boolean;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    // Connection methods
+    function BuildConnectionString(const Server, Database, Username, Password: string;
+                                  WindowsAuth: Boolean = False): string;
+    function Connect: Boolean;
+    function Disconnect: Boolean;
+    function TestConnection: Boolean;
+    
+    // Transaction methods
+    function BeginTransaction: Boolean;
+    function CommitTransaction: Boolean;
+    function RollbackTransaction: Boolean;
+    
+    // Query methods
+    function ExecuteQuery(const SQL: string): Boolean;
+    function ExecuteScalar(const SQL: string): Variant;
+    function OpenDataset(const SQL: string): TDataset;
+    
+    // CRUD operations
+    function Insert(const TableName: string; const Fields: array of string; 
+                   const Values: array of Variant): Integer;
+    function Update(const TableName: string; const Fields: array of string;
+                   const Values: array of Variant; const WhereClause: string): Integer;
+    function Delete(const TableName: string; const WhereClause: string): Integer;
+    
+    // Stored procedure methods
+    function ExecuteStoredProc(const ProcName: string; 
+                              const ParamNames: array of string;
+                              const ParamValues: array of Variant;
+                              const OutputParams: array of string = nil): Boolean;
+    function GetStoredProcResult(const ParamName: string): Variant;
+    
+    // Utility methods
+    function EscapeString(const Value: string): string;
+    function GetLastInsertID: Integer;
+    function QuotedStr(const Value: string): string;
+    function CreateTable(const TableName: string; const ColumnDefs: array of string): Boolean;
+    function DropTable(const TableName: string): Boolean;
+    function TableExists(const TableName: string): Boolean;
+    function GetTableColumns(const TableName: string): TStringList;
+    
+    // Properties
+    property ConnectionString: string read FConnectionString write SetConnectionString;
+    property Connection: TADOConnection read FConnection;
+    property Query: TADOQuery read FQuery;
+    property LastError: string read FLastError;
+    property LastErrorCode: Integer read FLastErrorCode;
+    property Connected: Boolean read GetConnected;
+    property Timeout: Integer read FTimeout write SetTimeout default 30;
+  end;
+
+// Simple interface for singleton pattern
+function DFMsSql: TDFMsSqlConnection;
+
+implementation
+
+var
+  FMsSqlInstance: TDFMsSqlConnection = nil;
+
+function DFMsSql: TDFMsSqlConnection;
+begin
+  if FMsSqlInstance = nil then
+    FMsSqlInstance := TDFMsSqlConnection.Create;
+  Result := FMsSqlInstance;
+end;
+
+{ TDFMsSqlConnection }
+
+constructor TDFMsSqlConnection.Create;
+begin
+  inherited Create;
+  FConnection := TADOConnection.Create(nil);
+  FQuery := TADOQuery.Create(nil);
+  FQuery.Connection := FConnection;
+  FTimeout := 30;
+  FConnection.LoginPrompt := False;
+  FConnection.CommandTimeout := FTimeout;
+  FConnected := False;
+end;
+
+destructor TDFMsSqlConnection.Destroy;
+begin
+  Disconnect;
+  FQuery.Free;
+  FConnection.Free;
+  inherited;
+end;
+
+procedure TDFMsSqlConnection.SetConnectionString(const Value: string);
+begin
+  if FConnectionString <> Value then
+  begin
+    FConnectionString := Value;
+    FConnection.ConnectionString := Value;
+  end;
+end;
+
+procedure TDFMsSqlConnection.SetTimeout(const Value: Integer);
+begin
+  if FTimeout <> Value then
+  begin
+    FTimeout := Value;
+    FConnection.CommandTimeout := Value;
+  end;
+end;
+
+function TDFMsSqlConnection.GetConnected: Boolean;
+begin
+  Result := FConnection.Connected;
+end;
+
+function TDFMsSqlConnection.BuildConnectionString(const Server, Database, Username, 
+                                                Password: string;
+                                                WindowsAuth: Boolean = False): string;
+begin
+  Result := 'Provider=SQLOLEDB.1;';
+  Result := Result + 'Data Source=' + Server + ';';
+  Result := Result + 'Initial Catalog=' + Database + ';';
+  
+  if WindowsAuth then
+    Result := Result + 'Integrated Security=SSPI;'
+  else
+  begin
+    Result := Result + 'Persist Security Info=True;';
+    Result := Result + 'User ID=' + Username + ';';
+    Result := Result + 'Password=' + Password + ';';
+  end;
+  
+  ConnectionString := Result;
+end;
+
+function TDFMsSqlConnection.Connect: Boolean;
+begin
+  Result := False;
+  try
+    if FConnection.Connected then
+      FConnection.Close;
+    
+    FConnection.ConnectionString := FConnectionString;
+    FConnection.Open;
+    Result := FConnection.Connected;
+    FConnected := Result;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.Disconnect: Boolean;
+begin
+  Result := False;
+  try
+    if FConnection.Connected then
+      FConnection.Close;
+    Result := not FConnection.Connected;
+    FConnected := not Result;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.TestConnection: Boolean;
+begin
+  Result := Connect;
+  if Result then
+    Disconnect;
+end;
+
+function TDFMsSqlConnection.BeginTransaction: Boolean;
+begin
+  Result := False;
+  try
+    if not FConnection.Connected then
+      if not Connect then
+        Exit;
+    
+    FConnection.BeginTrans;
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.CommitTransaction: Boolean;
+begin
+  Result := False;
+  try
+    FConnection.CommitTrans;
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.RollbackTransaction: Boolean;
+begin
+  Result := False;
+  try
+    FConnection.RollbackTrans;
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.ExecuteQuery(const SQL: string): Boolean;
+begin
+  Result := False;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    if not FConnection.Connected then
+      if not Connect then
+        Exit;
+    
+    FQuery.Close;
+    FQuery.SQL.Text := SQL;
+    FQuery.ExecSQL;
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.ExecuteScalar(const SQL: string): Variant;
+begin
+  Result := Null;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    if not FConnection.Connected then
+      if not Connect then
+        Exit;
+    
+    FQuery.Close;
+    FQuery.SQL.Text := SQL;
+    FQuery.Open;
+    
+    if not FQuery.IsEmpty then
+      Result := FQuery.Fields[0].Value;
+      
+    FQuery.Close;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.OpenDataset(const SQL: string): TDataset;
+var
+  Query: TADOQuery;
+begin
+  Result := nil;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    if not FConnection.Connected then
+      if not Connect then
+        Exit;
+    
+    Query := TADOQuery.Create(nil);
+    Query.Connection := FConnection;
+    Query.SQL.Text := SQL;
+    Query.Open;
+    
+    Result := Query;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.Insert(const TableName: string; const Fields: array of string;
+                                 const Values: array of Variant): Integer;
+var
+  SQL: string;
+  i: Integer;
+  FieldList, ValueList: string;
+begin
+  Result := -1;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  if Length(Fields) <> Length(Values) then
+  begin
+    FLastError := 'Fields and Values arrays must have the same length';
+    Exit;
+  end;
+  
+  try
+    // Prepare field list and value list
+    FieldList := '';
+    ValueList := '';
+    
+    for i := 0 to Length(Fields) - 1 do
+    begin
+      if i > 0 then
+      begin
+        FieldList := FieldList + ', ';
+        ValueList := ValueList + ', ';
+      end;
+      
+      FieldList := FieldList + Fields[i];
+      
+      if VarIsNull(Values[i]) then
+        ValueList := ValueList + 'NULL'
+      else if VarIsStr(Values[i]) then
+        ValueList := ValueList + QuotedStr(Values[i])
+      else if VarType(Values[i]) = varBoolean then
+      begin
+        if Values[i] then
+          ValueList := ValueList + '1'
+        else
+          ValueList := ValueList + '0';
+      end
+      else if VarType(Values[i]) = varDate then
+        ValueList := ValueList + QuotedStr(FormatDateTime('yyyy-mm-dd hh:nn:ss', Values[i]))
+      else
+        ValueList := ValueList + VarToStr(Values[i]);
+    end;
+    
+    // Build SQL
+    SQL := Format('INSERT INTO %s (%s) VALUES (%s)', [TableName, FieldList, ValueList]);
+    
+    if ExecuteQuery(SQL) then
+      Result := GetLastInsertID;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.Update(const TableName: string; const Fields: array of string;
+                                 const Values: array of Variant; const WhereClause: string): Integer;
+var
+  SQL: string;
+  i: Integer;
+  SetClause: string;
+begin
+  Result := -1;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  if Length(Fields) <> Length(Values) then
+  begin
+    FLastError := 'Fields and Values arrays must have the same length';
+    Exit;
+  end;
+  
+  try
+    // Prepare SET clause
+    SetClause := '';
+    
+    for i := 0 to Length(Fields) - 1 do
+    begin
+      if i > 0 then
+        SetClause := SetClause + ', ';
+      
+      SetClause := SetClause + Fields[i] + ' = ';
+      
+      if VarIsNull(Values[i]) then
+        SetClause := SetClause + 'NULL'
+      else if VarIsStr(Values[i]) then
+        SetClause := SetClause + QuotedStr(Values[i])
+      else if VarType(Values[i]) = varBoolean then
+      begin
+        if Values[i] then
+          SetClause := SetClause + '1'
+        else
+          SetClause := SetClause + '0';
+      end
+      else if VarType(Values[i]) = varDate then
+        SetClause := SetClause + QuotedStr(FormatDateTime('yyyy-mm-dd hh:nn:ss', Values[i]))
+      else
+        SetClause := SetClause + VarToStr(Values[i]);
+    end;
+    
+    // Build SQL
+    SQL := Format('UPDATE %s SET %s', [TableName, SetClause]);
+    
+    if WhereClause <> '' then
+      SQL := SQL + ' WHERE ' + WhereClause;
+    
+    if ExecuteQuery(SQL) then
+      Result := FQuery.RowsAffected;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.Delete(const TableName: string; const WhereClause: string): Integer;
+var
+  SQL: string;
+begin
+  Result := -1;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    // Build SQL
+    SQL := Format('DELETE FROM %s', [TableName]);
+    
+    if WhereClause <> '' then
+      SQL := SQL + ' WHERE ' + WhereClause;
+    
+    if ExecuteQuery(SQL) then
+      Result := FQuery.RowsAffected;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.ExecuteStoredProc(const ProcName: string;
+                                            const ParamNames: array of string;
+                                            const ParamValues: array of Variant;
+                                            const OutputParams: array of string = nil): Boolean;
+var
+  Proc: TADOStoredProc;
+  i, j: Integer;
+  IsOutput: Boolean;
+begin
+  Result := False;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  if Length(ParamNames) <> Length(ParamValues) then
+  begin
+    FLastError := 'ParamNames and ParamValues arrays must have the same length';
+    Exit;
+  end;
+  
+  try
+    if not FConnection.Connected then
+      if not Connect then
+        Exit;
+    
+    Proc := TADOStoredProc.Create(nil);
+    try
+      Proc.Connection := FConnection;
+      Proc.ProcedureName := ProcName;
+      Proc.Parameters.Clear;
+      Proc.Prepared := True;
+      
+      // Set parameters
+      for i := 0 to Length(ParamNames) - 1 do
+      begin
+        // Check if parameter is output
+        IsOutput := False;
+        if Length(OutputParams) > 0 then
+        begin
+          for j := 0 to Length(OutputParams) - 1 do
+          begin
+            if SameText(ParamNames[i], OutputParams[j]) then
+            begin
+              IsOutput := True;
+              Break;
+            end;
+          end;
+        end;
+        
+        with Proc.Parameters.AddParameter do
+        begin
+          Name := ParamNames[i];
+          Value := ParamValues[i];
+          
+          if IsOutput then
+            Direction := pdOutput;
+        end;
+      end;
+      
+      Proc.ExecProc;
+      Result := True;
+      
+      // Copy parameters to query for later retrieval
+      FQuery.Close;
+      FQuery.SQL.Text := 'SELECT 1';
+      FQuery.Parameters.Clear;
+      
+      for i := 0 to Proc.Parameters.Count - 1 do
+      begin
+        if Proc.Parameters[i].Direction = pdOutput then
+        begin
+          with FQuery.Parameters.AddParameter do
+          begin
+            Name := Proc.Parameters[i].Name;
+            Value := Proc.Parameters[i].Value;
+          end;
+        end;
+      end;
+    finally
+      Proc.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.GetStoredProcResult(const ParamName: string): Variant;
+var
+  i: Integer;
+begin
+  Result := Null;
+  
+  for i := 0 to FQuery.Parameters.Count - 1 do
+  begin
+    if SameText(FQuery.Parameters[i].Name, ParamName) then
+    begin
+      Result := FQuery.Parameters[i].Value;
+      Break;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.EscapeString(const Value: string): string;
+begin
+  // Simple SQL injection prevention by doubling single quotes
+  Result := StringReplace(Value, '''', '''''', [rfReplaceAll]);
+end;
+
+function TDFMsSqlConnection.GetLastInsertID: Integer;
+begin
+  Result := StrToIntDef(VarToStr(ExecuteScalar('SELECT @@IDENTITY')), -1);
+end;
+
+function TDFMsSqlConnection.QuotedStr(const Value: string): string;
+begin
+  Result := '''' + EscapeString(Value) + '''';
+end;
+
+function TDFMsSqlConnection.CreateTable(const TableName: string; 
+                                       const ColumnDefs: array of string): Boolean;
+var
+  SQL: string;
+  i: Integer;
+  Columns: string;
+begin
+  Result := False;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    Columns := '';
+    
+    for i := 0 to Length(ColumnDefs) - 1 do
+    begin
+      if i > 0 then
+        Columns := Columns + ', ';
+      
+      Columns := Columns + ColumnDefs[i];
+    end;
+    
+    SQL := Format('CREATE TABLE %s (%s)', [TableName, Columns]);
+    Result := ExecuteQuery(SQL);
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.DropTable(const TableName: string): Boolean;
+var
+  SQL: string;
+begin
+  Result := False;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    SQL := Format('DROP TABLE %s', [TableName]);
+    Result := ExecuteQuery(SQL);
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.TableExists(const TableName: string): Boolean;
+var
+  SQL: string;
+  V: Variant;
+begin
+  Result := False;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    SQL := 'SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES ' +
+           'WHERE TABLE_TYPE = ''BASE TABLE'' AND TABLE_NAME = ' + QuotedStr(TableName);
+    
+    V := ExecuteScalar(SQL);
+    
+    if not VarIsNull(V) then
+      Result := (V > 0);
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+    end;
+  end;
+end;
+
+function TDFMsSqlConnection.GetTableColumns(const TableName: string): TStringList;
+var
+  SQL: string;
+  Dataset: TDataset;
+begin
+  Result := TStringList.Create;
+  FLastError := '';
+  FLastErrorCode := 0;
+  
+  try
+    SQL := 'SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS ' +
+           'WHERE TABLE_NAME = ' + QuotedStr(TableName) + ' ORDER BY ORDINAL_POSITION';
+    
+    Dataset := OpenDataset(SQL);
+    
+    if Assigned(Dataset) then
+    try
+      while not Dataset.Eof do
+      begin
+        Result.Add(Format('%s|%s', [Dataset.FieldByName('COLUMN_NAME').AsString,
+                                   Dataset.FieldByName('DATA_TYPE').AsString]));
+        Dataset.Next;
+      end;
+    finally
+      Dataset.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      FLastError := E.Message;
+      FLastErrorCode := -1;
+      FreeAndNil(Result);
+    end;
+  end;
+end;
+
+initialization
+
+finalization
+  if FMsSqlInstance <> nil then
+    FreeAndNil(FMsSqlInstance);
+
+end.
